@@ -361,15 +361,16 @@ button {
 
 #motion-dot {
   position: absolute;
-  left: 50%;
-  top: 50%;
+  left: 0;
+  top: 0;
+  will-change: transform;
   width: 18px;
   height: 18px;
   border-radius: 50%;
   background: #060607;
   box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18);
-  transform: translate(-50%, -50%);
-  transition: left 70ms linear, top 70ms linear, width 120ms ease, height 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+  transform: translate3d(50vw, 50vh, 0) translate(-50%, -50%);
+  transition: width 120ms ease, height 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
   pointer-events: none;
 }
 
@@ -386,14 +387,15 @@ button {
 
 #ghost-dot {
   position: absolute;
-  left: 50%;
-  top: 50%;
+  left: 0;
+  top: 0;
+  will-change: transform;
   width: 18px;
   height: 18px;
   border: 2px dashed rgba(6, 6, 7, 0.75);
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.12);
-  transform: translate(-50%, -50%);
+  transform: translate3d(50vw, 50vh, 0) translate(-50%, -50%);
   opacity: 0;
   transition: opacity 160ms ease, width 120ms ease, height 120ms ease, border-color 120ms ease;
   pointer-events: none;

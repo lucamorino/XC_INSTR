@@ -47,7 +47,13 @@ const GHOST_SCORE_RATE = 0.05;
 
 // Accelerometer → scene mapping, as in XC
 const MAX_G = 2.81;
-const MOTION_SMOOTHING_WINDOW = 50;
+// Motion smoothing: a one-pole low-pass with this time constant (ms). Lower is
+// more reactive (and more jittery), higher is smoother (and laggier). XC used a
+// 50-sample average, roughly 800 ms of lag at 60 Hz.
+const MOTION_SMOOTHING_MS = 90;
+// Resolution of the values sent to the `accelerometer` inport (-10 – 10):
+// 0 sends them continuous; 1 sends XC's integer steps (21 positions per axis).
+const ACCEL_DEVICE_STEP = 0;
 const MOTION_FALLBACK_DELAY_MS = 1500;
 const POINTER_DRAG_LERP = 0.35;
 
@@ -100,35 +106,32 @@ function requestMotionPermission() {
   return Promise.resolve('granted');
 }
 
-// Log-weighted moving average over the last N samples (XC's motion smoothing)
-const MOTION_LOG_WEIGHTS = Array.from(
-  { length: MOTION_SMOOTHING_WINDOW },
-  (_, i) => Math.log(i + 2),
-);
-
-function smoothMotionValue(history, next) {
-  history.push(next);
-  if (history.length > MOTION_SMOOTHING_WINDOW) {
-    history.shift();
-  }
-  const offset = MOTION_SMOOTHING_WINDOW - history.length;
-  let sum = 0;
-  let weights = 0;
-  for (let i = 0; i < history.length; i += 1) {
-    const w = MOTION_LOG_WEIGHTS[offset + i];
-    sum += history[i] * w;
-    weights += w;
-  }
-  return weights > 0 ? sum / weights : next;
+// One-pole low-pass, time-based: behaves the same whatever rate the phone
+// delivers motion events at (60 Hz on iOS, 50–200 Hz or irregular on Android).
+function createSmoother(tauMs) {
+  let value = null;
+  let last = 0;
+  return (next, now) => {
+    if (value === null) {
+      value = next;
+    } else {
+      const dt = clamp(now - last, 0, 200);
+      value += (next - value) * (1 - Math.exp(-dt / tauMs));
+    }
+    last = now;
+    return value;
+  };
 }
+
+const quantize = (v, step) => (step > 0 ? Math.round(v / step) * step : Math.round(v * 100) / 100);
 
 // Tilt → dot position on the scene (0–100, y down)
 function mapAccelToSceneCoords(accX, accY) {
   const nx = clamp((Number.isFinite(accX) ? accX : 0) / MAX_G, -1, 1);
   const ny = clamp((Number.isFinite(accY) ? accY : 0) / MAX_G, -1, 1);
   return {
-    x: Math.round(((nx + 1) * 0.5) * 100),
-    y: Math.round((1 - ((ny + 1) * 0.5)) * 100),
+    x: ((nx + 1) * 0.5) * 100,
+    y: (1 - ((ny + 1) * 0.5)) * 100,
   };
 }
 
@@ -136,7 +139,7 @@ function mapAccelToSceneCoords(accX, accY) {
 function mapAccelToDeviceCoords(accX, accY) {
   const nx = clamp((Number.isFinite(accX) ? accX : 0) / MAX_G, -1, 1);
   const ny = clamp((Number.isFinite(accY) ? accY : 0) / MAX_G, -1, 1);
-  return { x: Math.round(nx * 10), y: Math.round(ny * 10) };
+  return { x: quantize(nx * 10, ACCEL_DEVICE_STEP), y: quantize(ny * 10, ACCEL_DEVICE_STEP) };
 }
 
 // Dragged dot position → `accelerometer` values, for devices without sensors
@@ -315,16 +318,29 @@ async function main($container, audioContext) {
     return 'game over';
   }
 
-  function updateDots() {
-    $dot.style.left = `${me.x}%`;
-    $dot.style.top = `${me.y}%`;
+  // Dots are drawn once per animation frame, however often the sensor fires,
+  // and moved with a GPU transform (no layout, no CSS transition to fight).
+  let dotsRAF = null;
+
+  function drawDots() {
+    dotsRAF = null;
+    const w = $scene.clientWidth;
+    const h = $scene.clientHeight;
+    $dot.style.transform = `translate3d(${(me.x / 100) * w}px, ${(me.y / 100) * h}px, 0) translate(-50%, -50%)`;
     $dot.classList.toggle('is-collision-active', session.collide);
-    $ghost.style.left = `${ghost.x}%`;
-    $ghost.style.top = `${ghost.y}%`;
+    $ghost.style.transform = `translate3d(${(ghost.x / 100) * w}px, ${(ghost.y / 100) * h}px, 0) translate(-50%, -50%)`;
     $ghost.classList.toggle('is-visible', ghost.visible);
     $ghost.classList.toggle('is-collision-active', session.collide);
     $ghost.classList.toggle('is-proximate', session.proximity);
   }
+
+  function updateDots() {
+    if (dotsRAF === null) {
+      dotsRAF = requestAnimationFrame(drawDots);
+    }
+  }
+
+  window.addEventListener('resize', updateDots);
 
   function updateText(selector, value) {
     const el = $container.querySelector(selector);
@@ -565,9 +581,9 @@ async function main($container, audioContext) {
 
   // ── Motion ─────────────────────────────────────────────────────────────────
 
-  const motionXHistory = [];
-  const motionYHistory = [];
-  const motionZHistory = [];
+  const smoothX = createSmoother(MOTION_SMOOTHING_MS);
+  const smoothY = createSmoother(MOTION_SMOOTHING_MS);
+  const smoothZ = createSmoother(MOTION_SMOOTHING_MS);
   let motionEventReceived = false;
   let pointerDragEnabled = false;
 
@@ -593,9 +609,10 @@ async function main($container, audioContext) {
         motionEventReceived = true;
         setPointerDrag(false);
       }
-      const x = smoothMotionValue(motionXHistory, typeof acc.x === 'number' ? acc.x : 0);
-      const y = smoothMotionValue(motionYHistory, typeof acc.y === 'number' ? acc.y : 0);
-      const z = smoothMotionValue(motionZHistory, typeof acc.z === 'number' ? acc.z : 0);
+      const now = e.timeStamp || performance.now();
+      const x = smoothX(typeof acc.x === 'number' ? acc.x : 0, now);
+      const y = smoothY(typeof acc.y === 'number' ? acc.y : 0, now);
+      const z = smoothZ(typeof acc.z === 'number' ? acc.z : 0, now);
       const deviceCoords = mapAccelToDeviceCoords(x, y);
       sendMessageToInport('accelerometer', [deviceCoords.x, deviceCoords.y, z]);
       moveMe(mapAccelToSceneCoords(x, y));

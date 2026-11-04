@@ -33,14 +33,27 @@ const PRESET_RANGE_MIN = 0; // presets drawn at random on each collision
 const PRESET_RANGE_MAX = 6;
 const INITIAL_PRESET = 1;
 const WINNING_SCORE = 10;
-// XC's controller can raise an "alarm": a collision then also sends the
-// opponent's score to the device and turns the scene black & white. There is no
-// controller here, so it stays off; set it to 1 to test that path.
-const ALARM = 0;
+// The alarm (XC's controller switch): while it is on, a collision also sends
+// the opponent's score to the device and sets its `state` to 1 — the xplosive
+// collision, with the black & white noisy scene. In the game session it is
+// switched on and off at random, like XC's controller automation; in the trial
+// session the user switches it with the "alarm" button.
+const ALARM_MIN_INTERVAL_MS = 3000; // XC controller automation interval
+const ALARM_MAX_INTERVAL_MS = 25000;
 
 // Ghost opponent
-const GHOST_SPEED = 0.25; // scene units per animation frame when automated
-const GHOST_MARGIN = 10; // keep the ghost (and its targets) this far from the edges
+const GHOST_MARGIN = 8; // keep the ghost (and its targets) this far from the edges
+// Automated movement imitates a player: it explores one sector of the space
+// (short moves, small pauses), then suddenly dashes to another sector.
+// Speeds in scene units per second (the scene is 100 units wide).
+const GHOST_EXPLORE_SPEED = [25, 60];
+const GHOST_DASH_SPEED = [150, 260];
+const GHOST_SECTOR_RADIUS = 14; // size of the explored area
+const GHOST_SECTOR_JUMP = 35; // minimum distance of a new sector
+const GHOST_EXPLORE_TIME = [1.5, 6]; // seconds spent in a sector
+const GHOST_PAUSE = [0, 0.5]; // hesitation between moves, seconds
+const GHOST_PAUSE_CHANCE = 0.35;
+const GHOST_INERTIA = 0.12; // seconds for the velocity to follow the intent
 // In the game session the ghost earns S-points at a random rate, so that the
 // race has an opponent: on average GHOST_SCORE_RATE points per second.
 const GHOST_SCORE_RATE = 0.05;
@@ -242,11 +255,22 @@ async function main($container, audioContext) {
     proximity: false,
     periphery: false,
     state: 0, // the device `state` inport (1 while alarmed collision)
+    alarm: 0,
   };
 
   const me = { x: 50, y: 50 };
   const ghost = { ...randomGhostPosition(me), visible: false, auto: false };
-  let ghostTarget = randomGhostPosition(ghost);
+  const ghostMove = {
+    phase: 'explore', // 'explore' | 'dash'
+    center: { x: ghost.x, y: ghost.y }, // the sector being explored
+    target: { x: ghost.x, y: ghost.y },
+    speed: 0,
+    vx: 0,
+    vy: 0,
+    sectorUntil: 0, // time (s) to leave the sector
+    pauseUntil: 0,
+    lastTime: null,
+  };
 
   // ── Interface ──────────────────────────────────────────────────────────────
 
@@ -272,7 +296,7 @@ async function main($container, audioContext) {
           <span class="player-points-label">Sharpness:</span>
           <span id="sharpness-counter-value"></span>
         </div>
-        <img id="alarm-warning" class="alarm-warning ${ALARM > 0 ? 'is-visible' : ''}"
+        <img id="alarm-warning" class="alarm-warning ${session.alarm > 0 ? 'is-visible' : ''}"
              src="assets/images/warning.png" alt="Alarm warning">
         <div class="cloud-layer cloud-layer-a"></div>
         <div class="cloud-layer cloud-layer-b"></div>
@@ -292,6 +316,11 @@ async function main($container, audioContext) {
           <button type="button" class="scene-btn ${isTrial ? '' : 'active'}"
                   title="switch between trial and game session"
                   @click=${toggleMode}>${isTrial ? 'trial' : 'game'}</button>
+          ${isTrial ? html`
+            <button type="button" class="scene-btn scene-btn-alarm ${session.alarm > 0 ? 'active' : ''}"
+                    aria-pressed=${session.alarm > 0} title="switch the alarm (xplosive collisions)"
+                    @click=${toggleAlarm}>alarm</button>
+          ` : null}
         </nav>
       </div>
     `, $container);
@@ -406,7 +435,7 @@ async function main($container, audioContext) {
 
   function triggerCollision() {
     loadPresetAtIndex(randomPresetIndex());
-    if (ALARM > 0) {
+    if (session.alarm > 0) {
       sendMessageToInport('score', [session.ghostScore]);
       setDeviceState(1);
     }
@@ -450,17 +479,84 @@ async function main($container, audioContext) {
 
   let ghostRAF = null;
 
-  function stepGhost() {
-    const dx = ghostTarget.x - ghost.x;
-    const dy = ghostTarget.y - ghost.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 2) {
-      ghostTarget = randomGhostPosition(ghost);
-    } else {
-      const step = Math.min(dist, GHOST_SPEED);
-      ghost.x = clamp(ghost.x + (dx / dist) * step, GHOST_MARGIN, 100 - GHOST_MARGIN);
-      ghost.y = clamp(ghost.y + (dy / dist) * step, GHOST_MARGIN, 100 - GHOST_MARGIN);
+  const keepInside = v => clamp(v, GHOST_MARGIN, 100 - GHOST_MARGIN);
+
+  function pickExploreTarget() {
+    const a = Math.random() * Math.PI * 2;
+    const d = Math.sqrt(Math.random()) * GHOST_SECTOR_RADIUS;
+    ghostMove.target = {
+      x: keepInside(ghostMove.center.x + Math.cos(a) * d),
+      y: keepInside(ghostMove.center.y + Math.sin(a) * d),
+    };
+    ghostMove.speed = randomIn(...GHOST_EXPLORE_SPEED);
+  }
+
+  function startExploring(now) {
+    ghostMove.phase = 'explore';
+    ghostMove.center = { x: ghost.x, y: ghost.y };
+    ghostMove.sectorUntil = now + randomIn(...GHOST_EXPLORE_TIME);
+    pickExploreTarget();
+  }
+
+  function startDash() {
+    let next = null;
+    for (let i = 0; i < 30; i += 1) {
+      next = {
+        x: randomIn(GHOST_MARGIN, 100 - GHOST_MARGIN),
+        y: randomIn(GHOST_MARGIN, 100 - GHOST_MARGIN),
+      };
+      if (Math.hypot(next.x - ghost.x, next.y - ghost.y) >= GHOST_SECTOR_JUMP) {
+        break;
+      }
     }
+    ghostMove.phase = 'dash';
+    ghostMove.target = next;
+    ghostMove.speed = randomIn(...GHOST_DASH_SPEED);
+    ghostMove.pauseUntil = 0;
+  }
+
+  function stepGhost(frameTime) {
+    const now = frameTime / 1000;
+    const dt = ghostMove.lastTime === null ? 0 : clamp(now - ghostMove.lastTime, 0, 0.1);
+    ghostMove.lastTime = now;
+    if (ghostMove.sectorUntil === 0) {
+      startExploring(now);
+    }
+
+    const dx = ghostMove.target.x - ghost.x;
+    const dy = ghostMove.target.y - ghost.y;
+    const dist = Math.hypot(dx, dy);
+
+    // Where the ghost "wants" to go: towards the target, slowing down on arrival
+    let wantVx = 0;
+    let wantVy = 0;
+    if (now >= ghostMove.pauseUntil && dist > 0.5) {
+      const speed = Math.min(ghostMove.speed, dist * 6);
+      wantVx = (dx / dist) * speed;
+      wantVy = (dy / dist) * speed;
+    }
+
+    // Arrived: next move in the sector (maybe after a hesitation), or a dash
+    if (dist < 2) {
+      if (ghostMove.phase === 'dash') {
+        startExploring(now);
+      } else if (now >= ghostMove.sectorUntil) {
+        startDash();
+      } else {
+        pickExploreTarget();
+        if (Math.random() < GHOST_PAUSE_CHANCE) {
+          ghostMove.pauseUntil = now + randomIn(...GHOST_PAUSE);
+        }
+      }
+    }
+
+    // Inertia: the velocity follows the intent smoothly, so turns are curved
+    const k = dt > 0 ? 1 - Math.exp(-dt / GHOST_INERTIA) : 0;
+    ghostMove.vx += (wantVx - ghostMove.vx) * k;
+    ghostMove.vy += (wantVy - ghostMove.vy) * k;
+    ghost.x = keepInside(ghost.x + ghostMove.vx * dt);
+    ghost.y = keepInside(ghost.y + ghostMove.vy * dt);
+
     evaluateCollisions();
     ghostRAF = requestAnimationFrame(stepGhost);
   }
@@ -474,13 +570,47 @@ async function main($container, audioContext) {
   function toggleGhostAuto() {
     ghost.auto = !ghost.auto;
     if (ghost.auto && ghostRAF === null) {
-      ghostTarget = randomGhostPosition(ghost);
+      Object.assign(ghostMove, { vx: 0, vy: 0, sectorUntil: 0, pauseUntil: 0, lastTime: null });
       ghostRAF = requestAnimationFrame(stepGhost);
     } else if (!ghost.auto && ghostRAF !== null) {
       cancelAnimationFrame(ghostRAF);
       ghostRAF = null;
     }
     renderApp();
+  }
+
+  // ── Alarm ──────────────────────────────────────────────────────────────────
+
+  let alarmTimer = null;
+
+  function setAlarm(value) {
+    session.alarm = value > 0 ? 1 : 0;
+    sendMessageToInport('alarm', [session.alarm]);
+    renderApp();
+  }
+
+  function toggleAlarm() {
+    setAlarm(session.alarm > 0 ? 0 : 1);
+  }
+
+  function stopAlarmAutomation() {
+    if (alarmTimer !== null) {
+      clearTimeout(alarmTimer);
+      alarmTimer = null;
+    }
+  }
+
+  // XC's controller automation: flip the alarm after a random interval
+  function scheduleAlarmAutomation() {
+    stopAlarmAutomation();
+    alarmTimer = setTimeout(() => {
+      alarmTimer = null;
+      if (session.mode !== 'game' || !session.running) {
+        return;
+      }
+      toggleAlarm();
+      scheduleAlarmAutomation();
+    }, randomIn(ALARM_MIN_INTERVAL_MS, ALARM_MAX_INTERVAL_MS));
   }
 
   // ── Trial / game session ───────────────────────────────────────────────────
@@ -509,6 +639,9 @@ async function main($container, audioContext) {
       return;
     }
     stopGhostScore();
+    stopAlarmAutomation();
+    session.alarm = 0;
+    sendMessageToInport('alarm', [0]);
     session.endState = endState;
     setRunning(false);
     renderApp();
@@ -523,6 +656,9 @@ async function main($container, audioContext) {
     // restart the patch so its S-points start from zero
     sendMessageToInport('start', [0]);
     setRunning(true);
+    session.alarm = 0;
+    sendMessageToInport('alarm', [0]);
+    scheduleAlarmAutomation();
 
     stopGhostScore();
     ghostScoreTimer = setInterval(() => {
@@ -538,6 +674,9 @@ async function main($container, audioContext) {
 
   function startTrial() {
     stopGhostScore();
+    stopAlarmAutomation();
+    session.alarm = 0;
+    sendMessageToInport('alarm', [0]);
     session.mode = 'trial';
     session.endState = 0;
     session.sharpness = 0;
@@ -677,7 +816,7 @@ async function main($container, audioContext) {
   loadPresetAtIndex(INITIAL_PRESET);
   sendMessageToInport('state', [0]);
   sendMessageToInport('score', [0]);
-  sendMessageToInport('alarm', [ALARM]);
+  sendMessageToInport('alarm', [0]);
   sendMessageToInport('accelerometer', [0, 0, 0]);
   setRunning(true);
   evaluateCollisions();

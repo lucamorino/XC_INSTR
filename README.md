@@ -20,14 +20,21 @@ No server, no other players, no controller. Your opponent is a **ghost**.
     patch's modulation;
   - on a **collision** (5 units) the device jumps to a random preset (0–6) and
     your dot lights up.
-- The three buttons at the bottom of the page:
+- **The alarm** (⚠ on screen): while it is on, a collision is an *xplosive
+  collision* — the device gets the opponent's score and its `state` goes to 1,
+  and the scene turns black & white and noisy until you separate.
+- The buttons at the bottom of the page:
   1. **ghost** — show / hide the opponent (hidden by default).
-  2. **auto** — the ghost moves on its own, drifting between random spots.
+  2. **auto** — the ghost moves on its own, like a player would: it explores
+     one sector of the space with short moves and small hesitations, then
+     suddenly dashes to another sector.
   3. **trial / game** — switch the session:
      - **trial** (default) shows the device's **sharpness**;
      - **game** shows your S-points against the ghost's. The first to 10 wins.
-       The ghost earns its points at a random rate (~0.05/s on average). Tap
-       the game-over screen to play again.
+       The ghost earns its points at a random rate (~0.05/s on average), and
+       the alarm switches on and off at random every 3–25 s, as XC's
+       controller automation did. Tap the game-over screen to play again.
+  4. **alarm** (trial only) — switch the alarm yourself.
 
 ## How it maps to XC
 
@@ -38,7 +45,7 @@ No server, no other players, no controller. Your opponent is a **ghost**.
 | `global.training` (controller switch)              | **trial / game** button                    |
 | `global.running` / game over                       | starts with the page; ends at 10 S-points  |
 | `collision_distance`, `proximity_offset`, `periphery_offset`, `preset_range_*` | constants at the top of `js/app.js` |
-| `global.alarm`                                     | `ALARM` constant (off; no controller here) |
+| `global.alarm` + controller automation             | random in game, **alarm** button in trial  |
 | `@ircam/devicemotion`, platform-init screen        | `devicemotion` event, enter screen         |
 
 ## Layout

@@ -280,7 +280,7 @@ button {
 
 .alarm-warning {
   position: absolute;
-  top: 10px;
+  top: 54px; // below the HUD row
   left: 50%;
   z-index: 7;
   width: clamp(48px, 12vw, 88px);
